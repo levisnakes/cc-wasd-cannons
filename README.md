@@ -17,6 +17,8 @@ wget https://raw.githubusercontent.com/levisnakes/cc-wasd-cannons/main/wasd_cann
 | TAB | aim both / cannon 1 / cannon 2 |
 | H, Z, X (computer keyboard) | back to center, set center, safety |
 
+Put a wired modem on each Cannon Mount as well: moving or firing while the cannons are disassembled assembles them, and the direction they face on assembly becomes the center.
+
 Bind W A S D, SPACE, LEFT SHIFT and TAB to a frequency on the typewriter; it only sends bound keys.
 
 Turn speed is capped by MAX_YAW_SPEED / MAX_PITCH_SPEED (deg/s), or the controllers' own top speed (RPM / 24 degrees a tick) if that is slower.

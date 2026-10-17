@@ -13,6 +13,10 @@
 --   TAB   both / cannon 1 / cannon 2
 --   On the computer keyboard: H back to center, Z set here as center, X safety
 --
+-- Put a wired modem on each Cannon Mount too: then moving or firing while the
+-- cannons are disassembled assembles them, and where they point on assembly
+-- becomes the center.
+--
 -- Turn speed is MAX_YAW_SPEED / MAX_PITCH_SPEED, or the controllers' own top
 -- speed (RPM / 24 degrees a tick) if that is slower.
 
@@ -39,7 +43,7 @@ end
 
 -- ============================================================ setup
 
-VERSION = "1.2.1"
+VERSION = "1.3.0"
 local SAVE_FILE = "/wasd_cannons.dat"
 local TICK = 0.05
 local FIRE_EVERY = 0.25     -- Fire Controller stops 10 ticks after the last command
@@ -80,6 +84,8 @@ local cannons = {}
 local extras = 0            -- controllers with no partner
 local all = { yaw = {}, pitch = {}, fire = {} }
 local typewriter = nil
+local mounts = {}           -- cannon mount names (cc-cbc / compact mount)
+local mountInfo = {}        -- [name] = getInfo() table or false
 
 -- names sort as text, so "_10" would come before "_2" without this
 local function byNumber(a, b)
@@ -91,17 +97,20 @@ end
 
 local function findAll()
   typewriter = nil
+  mounts = {}
   local yaws, pitches, fires = {}, {}, {}
   for _, n in ipairs(names()) do
     if isType(n, "auto_yaw_controller") or isType(n, "yaw_controller") then yaws[#yaws + 1] = n
     elseif isType(n, "auto_pitch_controller") or isType(n, "pitch_controller") then pitches[#pitches + 1] = n
     elseif isType(n, "fire_controller") then fires[#fires + 1] = n
+    elseif hasType(n, "cannon_mount") or hasType(n, "compact_cannon_mount") then mounts[#mounts + 1] = n
     elseif not typewriter and hasType(n, "linked_typewriter") then typewriter = n end
   end
   extras = 0
   all = { yaw = yaws, pitch = pitches, fire = fires }
   if type(CANNONS) == "table" then
     cannons = CANNONS
+    table.sort(mounts, byNumber)
     all = { yaw = {}, pitch = {}, fire = {} }
     for _, c in ipairs(CANNONS) do
       for k in pairs(all) do if c[k] then table.insert(all[k], c[k]) end end
@@ -109,6 +118,7 @@ local function findAll()
     return
   end
   table.sort(yaws, byNumber); table.sort(pitches, byNumber); table.sort(fires, byNumber)
+  table.sort(mounts, byNumber)
   local list = {}
   for i = 1, math.max(#yaws, #pitches, #fires) do
     local c = { yaw = yaws[i], pitch = pitches[i], fire = fires[i] }
@@ -121,7 +131,8 @@ end
 
 -- ============================================================ state
 
-local aim = { yaw = 0, pitch = 0, yawZero = 0, pitchZero = 0 }
+-- assemYaw = mount yaw at the last assembly (assemKnown = 1 once seen)
+local aim = { yaw = 0, pitch = 0, yawZero = 0, pitchZero = 0, assemYaw = 0, assemKnown = 0 }
 local selected = 0          -- 0 = all cannons
 local armed = ARMED_AT_START ~= false
 local firing = false
@@ -184,6 +195,12 @@ local function readRates()
       end
     end
   end
+  for _, n in ipairs(mounts) do
+    fns[#fns + 1] = function()
+      local ok, info = pcall(peripheral.call, n, "getInfo")
+      mountInfo[n] = ok and type(info) == "table" and info or false
+    end
+  end
   if #fns > 0 then parallel.waitForAll(table.unpack(fns)) end
   for _, part in ipairs({ "yaw", "pitch" }) do
     local slowest = nil
@@ -230,6 +247,52 @@ local function stopFire()
   for _, n in ipairs(all.fire) do jobs[#jobs + 1] = { n, "fireOff" } end
   runJobs(jobs)
   firing = false
+end
+
+local function disassembled()
+  local out = {}
+  for _, n in ipairs(mounts) do
+    local info = mountInfo[n]
+    if info and info.assembled == false then out[#out + 1] = n end
+  end
+  return out
+end
+
+-- Assemble every disassembled mount. The controllers would swing a freshly
+-- assembled cannon to their old target, so aim them at where the mount
+-- faced last time first, then make the real heading the new center.
+local function assembleMounts()
+  local need = disassembled()
+  if #need == 0 then return false end
+  say("Assembling...")
+  if aim.assemKnown == 1 then
+    local jobs = {}
+    for _, n in ipairs(all.yaw) do jobs[#jobs + 1] = { n, "setAngle", aim.assemYaw } end
+    for _, n in ipairs(all.pitch) do jobs[#jobs + 1] = { n, "setAngle", 0 } end
+    runJobs(jobs)
+  end
+  local jobs = {}
+  for _, n in ipairs(need) do jobs[#jobs + 1] = { n, "assemble", true } end
+  runJobs(jobs)
+  readRates()
+  local yaw = nil
+  for _, n in ipairs(mounts) do
+    local info = mountInfo[n]
+    if info and info.assembled and type(info.yaw) == "number" then yaw = info.yaw; break end
+  end
+  if #disassembled() > 0 then
+    say("Assembly failed - check the cannon build")
+  else
+    say("Assembled - this is the center")
+  end
+  if yaw then
+    aim.yawZero, aim.pitchZero = yaw, 0
+    aim.assemYaw, aim.assemKnown = yaw, 1
+  end
+  aim.yaw, aim.pitch = 0, 0
+  pushAim(0, 0, true)
+  saveAim()
+  return true
 end
 
 -- ============================================================ keys
@@ -353,6 +416,17 @@ local function draw()
     y = y + 1
   end
   if extras > 0 then put(3, y, "+" .. extras .. " unpaired controller(s), moved with ALL", colors.gray); y = y + 1 end
+  if #mounts == 0 then
+    put(3, y, "No mount on network: no auto-assemble", colors.gray)
+  else
+    local off = #disassembled()
+    if off > 0 then
+      put(3, y, off .. "/" .. #mounts .. " disassembled - move or fire to assemble", colors.orange)
+    else
+      put(3, y, #mounts .. " mount(s) assembled", colors.lime)
+    end
+  end
+  y = y + 1
 
   -- live keys
   local ky = H - 4
@@ -388,6 +462,15 @@ local function controlLoop()
     last = t
     if t - lastScan > 5 then findAll(); lastScan = t end
     if t - lastRate > 1 then readRates(); lastRate = t end
+
+    local wantsAction = axis(KEYS.right, KEYS.left) ~= 0 or axis(KEYS.up, KEYS.down) ~= 0
+      or (armed and down(KEYS.fire))
+    if wantsAction and #disassembled() > 0 then
+      assembleMounts()
+      t = now()
+      last = t
+      lastRate = t
+    end
 
     local slow = down(KEYS.slow)
     local yawDir = axis(KEYS.right, KEYS.left) * (INVERT_YAW and -1 or 1)
