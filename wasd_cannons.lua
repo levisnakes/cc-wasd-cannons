@@ -18,6 +18,11 @@
 -- cannons are disassembled assembles them, and where they point on assembly
 -- becomes the center.
 --
+-- Ship protection: press R on the computer, then sweep the barrel along the
+-- top edge of your ship (A/D round, W/S so it just clears), then R again.
+-- The cannon won't fire below that edge. E (on/off) erases instead.
+-- With TAB on one cannon it only teaches that cannon; on ALL, every cannon.
+--
 -- Turn speed is MAX_YAW_SPEED / MAX_PITCH_SPEED, or the controllers' own top
 -- speed (RPM / 24 degrees a tick) if that is slower.
 
@@ -35,6 +40,7 @@ MAX_PITCH_SPEED = 15
 CANNONS = nil             -- nil = auto. Or {{yaw="...", pitch="...", fire="..."}, {...}}
 TOGGLE_CANNONS = { 3 }    -- these only fire with SPACE after Q turns them on
 TOGGLE_KEY = "q"
+SAFE_MARGIN = 3           -- degrees of extra room above the traced ship edge
 ARMED_AT_START = true     -- false = start with the safety on
 AUTO_UPDATE = true
 
@@ -46,7 +52,7 @@ end
 
 -- ============================================================ setup
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 local SAVE_FILE = "/wasd_cannons.dat"
 local TICK = 0.05
 local FIRE_EVERY = 0.25     -- Fire Controller stops 10 ticks after the last command
@@ -145,11 +151,30 @@ local kbHeld = {}
 local twError = nil
 local status, statusAt = "", 0
 local dirty = false
+local ZONE_FILE = "/wasd_cannons_zones.dat"
+local ZONE_BIN = 2          -- degrees of yaw per remembered edge point
+local zones = {}            -- [fire controller] = { [yaw bin] = edge pitch }
+local teach = nil           -- nil, "trace" or "erase"
+local blocked = {}          -- [fire controller] = true while aimed at the ship
+local fireOn = {}           -- [fire controller] = true while told to fire
 local rate = { yaw = nil, pitch = nil }   -- deg/s from RPM, nil = unknown
 local rpm = {}                             -- [controller name] = rpm or false
 local sent = {}                            -- [controller name] = last target
 
 local function say(text) status, statusAt = text, now() end
+
+local function saveZones()
+  local f = fs.open(ZONE_FILE, "w")
+  if f then f.write(textutils.serialize(zones)); f.close() end
+end
+
+local function loadZones()
+  if not fs.exists(ZONE_FILE) then return end
+  local f = fs.open(ZONE_FILE, "r")
+  local t = textutils.unserialize(f.readAll())
+  f.close()
+  if type(t) == "table" then zones = t end
+end
 
 local function saveAim()
   local f = fs.open(SAVE_FILE, "w")
@@ -197,6 +222,70 @@ local function fireTargets()
   local out = {}
   for _, n in ipairs(all.fire) do if not skip[n] then out[#out + 1] = n end end
   return out
+end
+
+-- Yaw/pitch here are the mount's own angles, which turn with the ship,
+-- so the traced edge stays right wherever the ship goes.
+local function absAim()
+  return (aim.yawZero + aim.yaw) % 360, aim.pitchZero + aim.pitch
+end
+
+local function binOf(yaw) return math.floor((yaw % 360) / ZONE_BIN) end
+local BINS = math.floor(360 / ZONE_BIN)
+
+-- highest traced edge within SAFE_MARGIN of this yaw, or nil
+local function edgeAt(fire, yaw)
+  local z = zones[fire]
+  if not z then return nil end
+  local reach = math.ceil(SAFE_MARGIN / ZONE_BIN)
+  local best = nil
+  local b0 = binOf(yaw)
+  for d = -reach, reach do
+    local e = z[(b0 + d) % BINS]
+    if e and (not best or e > best) then best = e end
+  end
+  return best
+end
+
+local function isBlocked(fire, yaw, pitch)
+  local e = edgeAt(fire, yaw)
+  return e ~= nil and pitch < e + SAFE_MARGIN
+end
+
+-- cannons the teach keys write to: the TAB pick, or every cannon on ALL
+local function teachTargets()
+  if selected > 0 and cannons[selected] then return { cannons[selected].fire } end
+  local out = {}
+  for _, c in ipairs(cannons) do out[#out + 1] = c.fire end
+  return out
+end
+
+-- record (or erase) every bin swept since the last tick
+local lastTeachBin = nil
+local function teachStep()
+  if not teach then lastTeachBin = nil; return end
+  local yaw, pitch = absAim()
+  local b = binOf(yaw)
+  local from = lastTeachBin or b
+  -- walk the short way round from the last bin to this one
+  local diff = (b - from + BINS / 2) % BINS - BINS / 2
+  local step = diff >= 0 and 1 or -1
+  for _, fire in ipairs(teachTargets()) do
+    if fire then
+      zones[fire] = zones[fire] or {}
+      for d = 0, diff, step do
+        local bin = (from + d) % BINS
+        if teach == "trace" then zones[fire][bin] = pitch else zones[fire][bin] = nil end
+      end
+    end
+  end
+  lastTeachBin = b
+end
+
+local function edgeCount(fire)
+  local n = 0
+  for _ in pairs(zones[fire] or {}) do n = n + 1 end
+  return n
 end
 
 -- mainThread calls each wait for a server tick, so run them side by side
@@ -271,6 +360,7 @@ local function stopFire()
   for _, n in ipairs(all.fire) do jobs[#jobs + 1] = { n, "fireOff" } end
   runJobs(jobs)
   firing = false
+  fireOn = {}
 end
 
 local function disassembled()
@@ -395,6 +485,8 @@ local function draw()
   put(15, 1, "v" .. VERSION, colors.lightBlue, colors.blue)
   local chip, chipBg = " ARMED ", colors.orange
   if not armed then chip, chipBg = " SAFE ", colors.green
+  elseif teach then chip, chipBg = teach == "trace" and " TRACING " or " ERASING ", colors.purple
+  elseif next(blocked) and down(KEYS.fire) then chip, chipBg = " SHIP IN WAY ", colors.red
   elseif firing then chip, chipBg = " FIRING ", colors.red end
   put(W - #chip + 1, 1, chip, colors.white, chipBg)
 
@@ -405,6 +497,28 @@ local function draw()
   if not YAW_MIN and not YAW_MAX then shownYaw = (aim.yaw + 180) % 360 - 180 end
   gauge(3, "Yaw", shownYaw, ylo, yhi, yawDir ~= 0)
   gauge(4, "Pitch", aim.pitch, PITCH_MIN or -90, PITCH_MAX or 90, pitchDir ~= 0)
+  -- red part of the pitch bar = ship in the way at this yaw
+  do
+    local yawA = absAim()
+    local edge = nil
+    for _, f in ipairs(teachTargets()) do
+      local e = f and edgeAt(f, yawA)
+      if e and (not edge or e > edge) then edge = e end
+    end
+    if edge then
+      local lo, hi = PITCH_MIN or -90, PITCH_MAX or 90
+      local value = string.format("%7.1f%s", aim.pitch, DEG)
+      local x0, x1 = 9, W - #value - 2
+      local width = x1 - x0 + 1
+      local cut = math.floor((clamp(edge + SAFE_MARGIN - aim.pitchZero, lo, hi) - lo) / (hi - lo) * (width - 1) + 0.5)
+      if cut > 0 then
+        local pos = math.floor((clamp(aim.pitch, lo, hi) - lo) / (hi - lo) * (width - 1) + 0.5)
+        local bar = {}
+        for i = 0, cut - 1 do bar[#bar + 1] = (i == pos) and "c" or "`" end
+        put(x0, 4, table.concat(bar), colors.red)
+      end
+    end
+  end
   local function speedText(a)
     return string.format("%.0f%s/s", (axisRate(a)), DEG)
   end
@@ -436,6 +550,12 @@ local function draw()
     if isToggled(i) then
       put(x + 1, y, "[" .. TOGGLE_KEY:upper() .. "] " .. (toggleOn and "ON " or "OFF"),
         toggleOn and colors.lime or colors.lightGray, bg)
+      x = x + 9
+    end
+    if c.fire and blocked[c.fire] then
+      put(x + 1, y, "SHIP", colors.white, colors.red)
+    elseif c.fire and edgeCount(c.fire) == 0 then
+      put(x + 1, y, "no guard", colors.lightGray, bg)
     end
     local info = ""
     if c.yaw and rpm[c.yaw] == 0 then info = "no rotation"
@@ -472,9 +592,12 @@ local function draw()
   if twError then put(17, ky, twError:sub(1, W - 18), colors.red) end
 
   -- status + footer
-  if status ~= "" and now() - statusAt < 4 then put(2, H - 1, status, colors.yellow) end
+  if teach then
+    put(2, H - 1, teach == "trace" and "Sweep along the ship's top edge, R to finish"
+      or "Sweep over what to forget, E to finish", colors.magenta)
+  elseif status ~= "" and now() - statusAt < 4 then put(2, H - 1, status, colors.yellow) end
   fill(H, colors.gray)
-  put(2, H, "H center  Z set center  X safety", colors.white, colors.gray)
+  put(2, H, "H center Z set center X safety R trace E erase", colors.white, colors.gray)
 
   screen.setVisible(true)
 end
@@ -486,6 +609,7 @@ local function controlLoop()
   local lastFire, lastDraw, lastSave, lastScan, lastRate = 0, 0, now(), now(), 0
   local wasMoving = false
   local wasToggleDown = false
+  fireOn = {}
   while true do
     local t = now()
     local dt = math.min(t - last, 0.25)
@@ -534,22 +658,28 @@ local function controlLoop()
       local list = {}
       for _, i in ipairs(TOGGLE_CANNONS or {}) do list[#list + 1] = "#" .. i end
       say("Cannon " .. table.concat(list, ", ") .. (toggleOn and " joins SPACE" or " sits out"))
-      if not toggleOn and firing then
-        for i, c in ipairs(cannons) do
-          if isToggled(i) and c.fire then jobs[#jobs + 1] = { c.fire, "fireOff" } end
-        end
-      end
     end
 
-    if armed and down(KEYS.fire) then
-      if not firing or t - lastFire >= FIRE_EVERY or toggled then
-        for _, n in ipairs(fireTargets()) do jobs[#jobs + 1] = { n, "keepFiring" } end
-        firing, lastFire = true, t
+    teachStep()
+
+    -- which fire controllers should be firing right now
+    local want = {}
+    blocked = {}
+    if armed and down(KEYS.fire) and not teach then
+      local yawA, pitchA = absAim()
+      for _, n in ipairs(fireTargets()) do
+        if isBlocked(n, yawA, pitchA) then blocked[n] = true else want[n] = true end
       end
-    elseif firing then
-      for _, n in ipairs(all.fire) do jobs[#jobs + 1] = { n, "fireOff" } end
-      firing = false
     end
+    local refresh = t - lastFire >= FIRE_EVERY
+    for n in pairs(fireOn) do
+      if not want[n] then jobs[#jobs + 1] = { n, "fireOff" }; fireOn[n] = nil end
+    end
+    for n in pairs(want) do
+      if not fireOn[n] or refresh then jobs[#jobs + 1] = { n, "keepFiring" }; fireOn[n] = true end
+    end
+    if refresh then lastFire = t end
+    firing = next(fireOn) ~= nil
 
     -- typewriter read, aim and trigger all go out in the same tick
     runJobs(jobs, poll)
@@ -581,6 +711,16 @@ local function eventLoop()
         aim.yaw, aim.pitch = 0, 0
         saveAim()
         say("Center set here")
+      elseif a == keys.r or a == keys.e then
+        local mode = a == keys.r and "trace" or "erase"
+        if teach == mode then
+          teach = nil
+          saveZones()
+          say(mode == "trace" and "Ship edge saved" or "Erased")
+        else
+          teach = mode
+          stopFire()
+        end
       elseif a == keys.x then
         armed = not armed
         if not armed then stopFire() end
@@ -601,6 +741,7 @@ end
 function readyToUpdate() return not firing and next(held) == nil end
 
 findAll()
+loadZones()
 if not loadAim() and cannons[1] then
   -- first run: start from wherever cannon 1 is pointed
   aim.yawZero = call(cannons[1].yaw, "getAngle") or 0
