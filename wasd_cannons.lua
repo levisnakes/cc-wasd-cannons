@@ -39,7 +39,7 @@ end
 
 -- ============================================================ setup
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 local SAVE_FILE = "/wasd_cannons.dat"
 local TICK = 0.05
 local FIRE_EVERY = 0.25     -- Fire Controller stops 10 ticks after the last command
@@ -424,7 +424,8 @@ local function controlLoop()
 
     -- typewriter read, aim and trigger all go out in the same tick
     runJobs(jobs, poll)
-    if not typewriter then sleep(TICK) end
+    -- the typewriter read may not wait a tick; never spin without yielding
+    if #jobs == 0 then sleep(TICK) end
 
     if dirty and not moving and t - lastSave > 2 then saveAim(); dirty = false; lastSave = t end
     if t - lastDraw >= 0.1 then draw(); lastDraw = t end
