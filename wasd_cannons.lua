@@ -33,6 +33,8 @@ INVERT_YAW = false        -- true if A turns right
 INVERT_PITCH = false      -- true if W points down
 YAW_MIN = nil             -- limits in degrees from center (nil = no limit)
 YAW_MAX = nil
+YAW_RIGHT_LIMIT = 204     -- mount yaw (shown as "Mount yaw" on screen) it can't
+YAW_LEFT_LIMIT = 330      -- turn past; nil = no limit
 PITCH_MIN = -30
 PITCH_MAX = 60
 MAX_YAW_SPEED = 20        -- degrees per second
@@ -52,7 +54,7 @@ end
 
 -- ============================================================ setup
 
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 local SAVE_FILE = "/wasd_cannons.dat"
 local TICK = 0.05
 local FIRE_EVERY = 0.25     -- Fire Controller stops 10 ticks after the last command
@@ -226,6 +228,25 @@ end
 
 -- Yaw/pitch here are the mount's own angles, which turn with the ship,
 -- so the traced edge stays right wherever the ship goes.
+-- Yaw limits relative to the center: YAW_MIN/YAW_MAX combined with the mount
+-- yaw limits. Those two angles split the circle into two arcs; the one the
+-- center sits in is where the cannon may turn.
+local function yawLimits()
+  local lo, hi = YAW_MIN, YAW_MAX
+  if YAW_RIGHT_LIMIT and YAW_LEFT_LIMIT then
+    local zero = aim.yawZero % 360
+    local a, b = YAW_RIGHT_LIMIT % 360, YAW_LEFT_LIMIT % 360
+    local w = (b - a) % 360
+    local c = (zero - a) % 360
+    if c > w then a, b = b, a; w = 360 - w; c = (zero - a) % 360 end
+    if c <= w then
+      lo = math.max(lo or -math.huge, -c)
+      hi = math.min(hi or math.huge, w - c)
+    end
+  end
+  return lo, hi
+end
+
 local function absAim()
   return (aim.yawZero + aim.yaw) % 360, aim.pitchZero + aim.pitch
 end
@@ -337,7 +358,7 @@ end
 -- adds setAngle calls to jobs; lead > 0 keeps the target ahead of the mount
 local function aimJobs(jobs, yawLead, pitchLead, force)
   local values = {
-    yaw = aim.yawZero + clamp(aim.yaw + (yawLead or 0), YAW_MIN, YAW_MAX),
+    yaw = aim.yawZero + clamp(aim.yaw + (yawLead or 0), yawLimits()),
     pitch = aim.pitchZero + clamp(aim.pitch + (pitchLead or 0), PITCH_MIN, PITCH_MAX),
   }
   for part, v in pairs(values) do
@@ -492,9 +513,11 @@ local function draw()
 
   -- aim gauges
   local yawDir, pitchDir = axis(KEYS.right, KEYS.left), axis(KEYS.up, KEYS.down)
-  local ylo, yhi = YAW_MIN or -180, YAW_MAX or 180
+  local ylo, yhi = yawLimits()
   local shownYaw = aim.yaw
-  if not YAW_MIN and not YAW_MAX then shownYaw = (aim.yaw + 180) % 360 - 180 end
+  if not ylo and not yhi then shownYaw = (aim.yaw + 180) % 360 - 180 end
+  ylo, yhi = ylo or -180, yhi or 180
+  if yhi - ylo < 1 then yhi = ylo + 1 end
   gauge(3, "Yaw", shownYaw, ylo, yhi, yawDir ~= 0)
   gauge(4, "Pitch", aim.pitch, PITCH_MIN or -90, PITCH_MAX or 90, pitchDir ~= 0)
   -- red part of the pitch bar = ship in the way at this yaw
@@ -522,7 +545,8 @@ local function draw()
   local function speedText(a)
     return string.format("%.0f%s/s", (axisRate(a)), DEG)
   end
-  put(2, 5, "Turn speed  yaw " .. speedText("yaw") .. "  pitch " .. speedText("pitch"), colors.gray)
+  put(2, 5, string.format("Mount yaw %.0f%s", (aim.yawZero + aim.yaw) % 360, DEG)
+    .. "   speed " .. speedText("yaw") .. " / " .. speedText("pitch"), colors.gray)
 
   -- cannons
   put(2, 7, "CANNONS", colors.lightGray)
@@ -636,7 +660,9 @@ local function controlLoop()
     local yr, yTop = axisRate("yaw")
     local pr, pTop = axisRate("pitch")
     local mult = slow and SLOW or 1
-    aim.yaw = clamp(aim.yaw + yawDir * yr * mult * dt, YAW_MIN, YAW_MAX)
+    local ylo, yhi = yawLimits()
+    if ylo or yhi then aim.yaw = (aim.yaw + 180) % 360 - 180 end
+    aim.yaw = clamp(aim.yaw + yawDir * yr * mult * dt, ylo, yhi)
     aim.pitch = clamp(aim.pitch + pitchDir * pr * mult * dt, PITCH_MIN, PITCH_MAX)
 
     local jobs = {}
