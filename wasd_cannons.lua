@@ -13,8 +13,8 @@
 --   TAB   both / cannon 1 / cannon 2
 --   On the computer keyboard: H back to center, Z set here as center, X safety
 --
--- Turn speed comes from the controllers' rotation speed (RPM / 24 degrees a
--- tick). For slower aiming give the controllers less RPM.
+-- Turn speed is MAX_YAW_SPEED / MAX_PITCH_SPEED, or the controllers' own top
+-- speed (RPM / 24 degrees a tick) if that is slower.
 
 KEYS = { up = "w", down = "s", left = "a", right = "d", fire = "space",
          slow = "leftShift", select = "tab" }
@@ -25,8 +25,8 @@ YAW_MIN = nil             -- limits in degrees from center (nil = no limit)
 YAW_MAX = nil
 PITCH_MIN = -30
 PITCH_MAX = 60
-YAW_SPEED = 30            -- degrees per second, only used if the RPM can't be read
-PITCH_SPEED = 30
+MAX_YAW_SPEED = 20        -- degrees per second
+MAX_PITCH_SPEED = 15
 CANNONS = nil             -- nil = auto. Or {{yaw="...", pitch="...", fire="..."}, {...}}
 ARMED_AT_START = true     -- false = start with the safety on
 AUTO_UPDATE = true
@@ -39,11 +39,11 @@ end
 
 -- ============================================================ setup
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 local SAVE_FILE = "/wasd_cannons.dat"
 local TICK = 0.05
 local FIRE_EVERY = 0.25     -- Fire Controller stops 10 ticks after the last command
-local LEAD = 0.4            -- seconds the target runs ahead while a key is held
+local LEAD = 0.4            -- seconds the target runs ahead at full controller speed
 local DEG = "\176"
 
 local function now() return os.epoch("utc") / 1000 end
@@ -77,7 +77,8 @@ local function call(name, method, ...)
 end
 
 local cannons = {}
-local extras = 0            -- controllers with no partner (ignored)
+local extras = 0            -- controllers with no partner
+local all = { yaw = {}, pitch = {}, fire = {} }
 local typewriter = nil
 
 -- names sort as text, so "_10" would come before "_2" without this
@@ -98,15 +99,20 @@ local function findAll()
     elseif not typewriter and hasType(n, "linked_typewriter") then typewriter = n end
   end
   extras = 0
+  all = { yaw = yaws, pitch = pitches, fire = fires }
   if type(CANNONS) == "table" then
     cannons = CANNONS
+    all = { yaw = {}, pitch = {}, fire = {} }
+    for _, c in ipairs(CANNONS) do
+      for k in pairs(all) do if c[k] then table.insert(all[k], c[k]) end end
+    end
     return
   end
   table.sort(yaws, byNumber); table.sort(pitches, byNumber); table.sort(fires, byNumber)
   local list = {}
   for i = 1, math.max(#yaws, #pitches, #fires) do
     local c = { yaw = yaws[i], pitch = pitches[i], fire = fires[i] }
-    -- a lone controller (e.g. one seen twice) is not a cannon
+    -- a lone controller is not shown as a cannon, but "all" still moves it
     local parts = (c.yaw and 1 or 0) + (c.pitch and 1 or 0) + (c.fire and 1 or 0)
     if parts >= 2 then list[#list + 1] = c else extras = extras + 1 end
   end
@@ -145,9 +151,11 @@ local function loadAim()
   return true
 end
 
-local function active()
-  if selected == 0 or not cannons[selected] then return cannons end
-  return { cannons[selected] }
+-- controller names for one part ("yaw"/"pitch"/"fire") of what TAB picked
+local function targets(part)
+  local c = selected > 0 and cannons[selected]
+  if not c then return all[part] end
+  return { c[part] }
 end
 
 local function clamp(v, lo, hi)
@@ -156,48 +164,71 @@ local function clamp(v, lo, hi)
   return v
 end
 
+-- mainThread calls each wait for a server tick, so run them side by side
+local function runJobs(jobs, first)
+  local fns = { first }
+  for _, j in ipairs(jobs) do
+    fns[#fns + 1] = function() pcall(peripheral.call, table.unpack(j)) end
+  end
+  if #fns > 0 then parallel.waitForAll(table.unpack(fns)) end
+end
+
 -- Create moves the mount RPM/24 degrees a tick, so 20 ticks = RPM * 5/6 deg/s
 local function readRates()
-  for _, c in ipairs(cannons) do
-    for _, n in ipairs({ c.yaw, c.pitch }) do
-      local s = call(n, "getSpeed")
-      rpm[n] = type(s) == "number" and math.abs(s) or false
+  local fns = {}
+  for _, part in ipairs({ "yaw", "pitch" }) do
+    for _, n in ipairs(all[part]) do
+      fns[#fns + 1] = function()
+        local ok, sp = pcall(peripheral.call, n, "getSpeed")
+        rpm[n] = ok and type(sp) == "number" and math.abs(sp) or false
+      end
     end
   end
-  for _, axis in ipairs({ "yaw", "pitch" }) do
+  if #fns > 0 then parallel.waitForAll(table.unpack(fns)) end
+  for _, part in ipairs({ "yaw", "pitch" }) do
     local slowest = nil
-    for _, c in ipairs(active()) do
-      local r = rpm[c[axis]]
-      if r then slowest = math.min(slowest or math.huge, r * 20 / 24) end
+    for _, n in ipairs(targets(part)) do
+      local r = rpm[n]
+      if r and r > 0 then slowest = math.min(slowest or math.huge, r * 20 / 24) end
     end
-    rate[axis] = slowest
+    rate[part] = slowest
   end
 end
 
-local function axisRate(axis)
-  if rate[axis] then return rate[axis] end
-  return axis == "yaw" and YAW_SPEED or PITCH_SPEED
+-- turn speed in deg/s, and whether that is the controllers' own top speed
+local function axisRate(part)
+  local cap = part == "yaw" and MAX_YAW_SPEED or MAX_PITCH_SPEED
+  local top = rate[part]
+  if not top then return cap or 30, false end
+  if cap and cap < top then return cap, false end
+  return top, true
 end
 
-local function sendTarget(name, value, force)
-  if not name then return end
-  if not force and sent[name] and math.abs(sent[name] - value) < 0.01 then return end
-  call(name, "setAngle", value)
-  sent[name] = value
+-- adds setAngle calls to jobs; lead > 0 keeps the target ahead of the mount
+local function aimJobs(jobs, yawLead, pitchLead, force)
+  local values = {
+    yaw = aim.yawZero + clamp(aim.yaw + (yawLead or 0), YAW_MIN, YAW_MAX),
+    pitch = aim.pitchZero + clamp(aim.pitch + (pitchLead or 0), PITCH_MIN, PITCH_MAX),
+  }
+  for part, v in pairs(values) do
+    for _, n in ipairs(targets(part)) do
+      if force or not sent[n] or math.abs(sent[n] - v) >= 0.01 then
+        jobs[#jobs + 1] = { n, "setAngle", v }
+        sent[n] = v
+      end
+    end
+  end
+  return jobs
 end
 
--- lead > 0 keeps the target ahead so the mount turns without stopping
 local function pushAim(yawLead, pitchLead, force)
-  local y = aim.yawZero + clamp(aim.yaw + (yawLead or 0), YAW_MIN, YAW_MAX)
-  local p = aim.pitchZero + clamp(aim.pitch + (pitchLead or 0), PITCH_MIN, PITCH_MAX)
-  for _, c in ipairs(active()) do
-    sendTarget(c.yaw, y, force)
-    sendTarget(c.pitch, p, force)
-  end
+  runJobs(aimJobs({}, yawLead, pitchLead, force))
 end
 
 local function stopFire()
-  for _, c in ipairs(cannons) do call(c.fire, "fireOff") end
+  local jobs = {}
+  for _, n in ipairs(all.fire) do jobs[#jobs + 1] = { n, "fireOff" } end
+  runJobs(jobs)
   firing = false
 end
 
@@ -288,8 +319,7 @@ local function draw()
   gauge(3, "Yaw", shownYaw, ylo, yhi, yawDir ~= 0)
   gauge(4, "Pitch", aim.pitch, PITCH_MIN or -90, PITCH_MAX or 90, pitchDir ~= 0)
   local function speedText(a)
-    if rate[a] then return string.format("%.0f%s/s", rate[a], DEG) end
-    return "? " .. DEG .. "/s"
+    return string.format("%.0f%s/s", (axisRate(a)), DEG)
   end
   put(2, 5, "Turn speed  yaw " .. speedText("yaw") .. "  pitch " .. speedText("pitch"), colors.gray)
 
@@ -322,7 +352,7 @@ local function draw()
     put(W - #info - 1, y, info, rpm[c.yaw] == 0 and colors.orange or colors.lightGray, bg)
     y = y + 1
   end
-  if extras > 0 then put(3, y, extras .. " lone controller(s) ignored", colors.gray); y = y + 1 end
+  if extras > 0 then put(3, y, "+" .. extras .. " unpaired controller(s), moved with ALL", colors.gray); y = y + 1 end
 
   -- live keys
   local ky = H - 4
@@ -358,40 +388,46 @@ local function controlLoop()
     last = t
     if t - lastScan > 5 then findAll(); lastScan = t end
     if t - lastRate > 1 then readRates(); lastRate = t end
-    poll()
 
     local slow = down(KEYS.slow)
     local yawDir = axis(KEYS.right, KEYS.left) * (INVERT_YAW and -1 or 1)
     local pitchDir = axis(KEYS.up, KEYS.down) * (INVERT_PITCH and -1 or 1)
-    local yr, pr = axisRate("yaw"), axisRate("pitch")
+    local yr, yTop = axisRate("yaw")
+    local pr, pTop = axisRate("pitch")
     local mult = slow and SLOW or 1
     aim.yaw = clamp(aim.yaw + yawDir * yr * mult * dt, YAW_MIN, YAW_MAX)
     aim.pitch = clamp(aim.pitch + pitchDir * pr * mult * dt, PITCH_MIN, PITCH_MAX)
 
+    local jobs = {}
     local moving = yawDir ~= 0 or pitchDir ~= 0
     if moving then
-      -- full speed: run the target ahead; slow: track exactly
-      local yl = slow and 0 or yawDir * math.min(yr * LEAD, 150)
-      local pl = slow and 0 or pitchDir * math.min(pr * LEAD, 150)
-      pushAim(yl, pl)
+      -- at the controllers' top speed the target has to run ahead or the
+      -- mount stops between updates; slower than that it follows each tick
+      local yl = (yTop and not slow) and yawDir * math.min(yr * LEAD, 150) or 0
+      local pl = (pTop and not slow) and pitchDir * math.min(pr * LEAD, 150) or 0
+      aimJobs(jobs, yl, pl)
       dirty = true
     elseif wasMoving then
-      pushAim(0, 0)       -- let go: stop where the mount is now
+      aimJobs(jobs, 0, 0)       -- let go: stop where the mount is now
     end
     wasMoving = moving
 
     if armed and down(KEYS.fire) then
       if not firing or t - lastFire >= FIRE_EVERY then
-        for _, c in ipairs(active()) do call(c.fire, "keepFiring") end
+        for _, n in ipairs(targets("fire")) do jobs[#jobs + 1] = { n, "keepFiring" } end
         firing, lastFire = true, t
       end
     elseif firing then
-      stopFire()
+      for _, n in ipairs(all.fire) do jobs[#jobs + 1] = { n, "fireOff" } end
+      firing = false
     end
+
+    -- typewriter read, aim and trigger all go out in the same tick
+    runJobs(jobs, poll)
+    if not typewriter then sleep(TICK) end
 
     if dirty and not moving and t - lastSave > 2 then saveAim(); dirty = false; lastSave = t end
     if t - lastDraw >= 0.1 then draw(); lastDraw = t end
-    sleep(TICK)
   end
 end
 
