@@ -19,4 +19,6 @@ wget https://raw.githubusercontent.com/levisnakes/cc-wasd-cannons/main/wasd_cann
 
 Bind W A S D, SPACE, LEFT SHIFT and TAB to a frequency on the typewriter; it only sends bound keys.
 
+Turn speed follows the controllers' rotation (RPM / 24 degrees a tick); give them less RPM to aim slower.
+
 Settings are at the top of the file (speeds, invert, pitch limits, manual CANNONS pairing). Auto-updates from this repo.
