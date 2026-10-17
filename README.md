@@ -14,12 +14,13 @@ wget https://raw.githubusercontent.com/levisnakes/cc-wasd-cannons/main/wasd_cann
 | A / D | yaw left / right |
 | SPACE (hold) | fire |
 | LEFT SHIFT | slow aim |
-| TAB | aim both / cannon 1 / cannon 2 |
+| TAB | aim all / cannon 1 / cannon 2 / ... |
+| Q | cannons in TOGGLE_CANNONS (default #3) join SPACE or sit out |
 | H, Z, X (computer keyboard) | back to center, set center, safety |
 
 Put a wired modem on each Cannon Mount as well: moving or firing while the cannons are disassembled assembles them, and the direction they face on assembly becomes the center.
 
-Bind W A S D, SPACE, LEFT SHIFT and TAB to a frequency on the typewriter; it only sends bound keys.
+Bind W A S D, SPACE, LEFT SHIFT, TAB and Q to a frequency on the typewriter; it only sends bound keys.
 
 Turn speed is capped by MAX_YAW_SPEED / MAX_PITCH_SPEED (deg/s), or the controllers' own top speed (RPM / 24 degrees a tick) if that is slower.
 

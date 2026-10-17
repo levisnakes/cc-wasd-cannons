@@ -7,10 +7,11 @@
 -- to pick one cannon and see which one moves, or set CANNONS below.
 --
 -- The typewriter only sends keys that are bound to a frequency, so bind
--- W A S D, SPACE, LEFT SHIFT and TAB on it. The computer's own keyboard works too.
+-- W A S D, SPACE, LEFT SHIFT, TAB and Q on it. The computer's own keyboard works too.
 --   W/S   pitch up/down        A/D   yaw left/right
 --   SPACE fire (hold)          SHIFT slow aim
---   TAB   both / cannon 1 / cannon 2
+--   TAB   all / cannon 1 / cannon 2 / ...
+--   Q     cannons in TOGGLE_CANNONS join SPACE or sit out
 --   On the computer keyboard: H back to center, Z set here as center, X safety
 --
 -- Put a wired modem on each Cannon Mount too: then moving or firing while the
@@ -32,6 +33,8 @@ PITCH_MAX = 60
 MAX_YAW_SPEED = 20        -- degrees per second
 MAX_PITCH_SPEED = 15
 CANNONS = nil             -- nil = auto. Or {{yaw="...", pitch="...", fire="..."}, {...}}
+TOGGLE_CANNONS = { 3 }    -- these only fire with SPACE after Q turns them on
+TOGGLE_KEY = "q"
 ARMED_AT_START = true     -- false = start with the safety on
 AUTO_UPDATE = true
 
@@ -43,7 +46,7 @@ end
 
 -- ============================================================ setup
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 local SAVE_FILE = "/wasd_cannons.dat"
 local TICK = 0.05
 local FIRE_EVERY = 0.25     -- Fire Controller stops 10 ticks after the last command
@@ -134,6 +137,7 @@ end
 -- assemYaw = mount yaw at the last assembly (assemKnown = 1 once seen)
 local aim = { yaw = 0, pitch = 0, yawZero = 0, pitchZero = 0, assemYaw = 0, assemKnown = 0 }
 local selected = 0          -- 0 = all cannons
+local toggleOn = false      -- TOGGLE_CANNONS fire with SPACE
 local armed = ARMED_AT_START ~= false
 local firing = false
 local held = {}
@@ -173,6 +177,26 @@ local function clamp(v, lo, hi)
   if lo and v < lo then v = lo end
   if hi and v > hi then v = hi end
   return v
+end
+
+local function isToggled(i)
+  for _, n in ipairs(TOGGLE_CANNONS or {}) do if n == i then return true end end
+  return false
+end
+
+-- fire controllers SPACE triggers: a picked cannon always fires; with ALL
+-- the toggle cannons only join while toggleOn
+local function fireTargets()
+  if selected > 0 and cannons[selected] then return { cannons[selected].fire } end
+  local skip = {}
+  if not toggleOn then
+    for i, c in ipairs(cannons) do
+      if isToggled(i) and c.fire then skip[c.fire] = true end
+    end
+  end
+  local out = {}
+  for _, n in ipairs(all.fire) do if not skip[n] then out[#out + 1] = n end end
+  return out
 end
 
 -- mainThread calls each wait for a server tick, so run them side by side
@@ -409,6 +433,10 @@ local function draw()
       put(x, y, part, col, bg)
       x = x + #part + 1
     end
+    if isToggled(i) then
+      put(x + 1, y, "[" .. TOGGLE_KEY:upper() .. "] " .. (toggleOn and "ON " or "OFF"),
+        toggleOn and colors.lime or colors.lightGray, bg)
+    end
     local info = ""
     if c.yaw and rpm[c.yaw] == 0 then info = "no rotation"
     elseif c.yaw and rpm[c.yaw] then info = string.format("%.0f rpm", rpm[c.yaw]) end
@@ -437,7 +465,8 @@ local function draw()
   keyCap(x + 1, ky + 1, "D", k("right"))
   x = keyCap(17, ky + 1, "SPACE", k("fire"))
   x = keyCap(x + 1, ky + 1, "SHIFT", k("slow"))
-  keyCap(x + 1, ky + 1, "TAB", false)
+  x = keyCap(x + 1, ky + 1, "TAB", false)
+  keyCap(x + 1, ky + 1, TOGGLE_KEY:upper(), toggleOn)
   local tw = typewriter and "typewriter ok" or "NO TYPEWRITER"
   put(W - #tw, ky, tw, typewriter and colors.gray or colors.red)
   if twError then put(17, ky, twError:sub(1, W - 18), colors.red) end
@@ -456,6 +485,7 @@ local function controlLoop()
   local last = now()
   local lastFire, lastDraw, lastSave, lastScan, lastRate = 0, 0, now(), now(), 0
   local wasMoving = false
+  local wasToggleDown = false
   while true do
     local t = now()
     local dt = math.min(t - last, 0.25)
@@ -471,6 +501,10 @@ local function controlLoop()
       last = t
       lastRate = t
     end
+
+    local toggleDown = down(TOGGLE_KEY)
+    local toggled = toggleDown and not wasToggleDown
+    wasToggleDown = toggleDown
 
     local slow = down(KEYS.slow)
     local yawDir = axis(KEYS.right, KEYS.left) * (INVERT_YAW and -1 or 1)
@@ -495,9 +529,21 @@ local function controlLoop()
     end
     wasMoving = moving
 
+    if toggled then
+      toggleOn = not toggleOn
+      local list = {}
+      for _, i in ipairs(TOGGLE_CANNONS or {}) do list[#list + 1] = "#" .. i end
+      say("Cannon " .. table.concat(list, ", ") .. (toggleOn and " joins SPACE" or " sits out"))
+      if not toggleOn and firing then
+        for i, c in ipairs(cannons) do
+          if isToggled(i) and c.fire then jobs[#jobs + 1] = { c.fire, "fireOff" } end
+        end
+      end
+    end
+
     if armed and down(KEYS.fire) then
-      if not firing or t - lastFire >= FIRE_EVERY then
-        for _, n in ipairs(targets("fire")) do jobs[#jobs + 1] = { n, "keepFiring" } end
+      if not firing or t - lastFire >= FIRE_EVERY or toggled then
+        for _, n in ipairs(fireTargets()) do jobs[#jobs + 1] = { n, "keepFiring" } end
         firing, lastFire = true, t
       end
     elseif firing then
