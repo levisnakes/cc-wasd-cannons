@@ -22,6 +22,7 @@
 -- fires it directly. It turns with the rotation fed into the mount's own
 -- yaw and pitch shafts, so those need power. Mounts left over after the
 -- controller cannons are used this way (or list them in DIRECT_MOUNTS).
+-- If the wrong mount gets picked, press M on the computer to try the next one.
 --
 -- Ship protection: press R on the computer, then sweep the barrel along the
 -- top edge of your ship (A/D round, W/S so it just clears), then R again.
@@ -61,7 +62,7 @@ end
 
 -- ============================================================ setup
 
-VERSION = "1.7.0"
+VERSION = "1.7.1"
 local SAVE_FILE = "/wasd_cannons.dat"
 local TICK = 0.05
 local FIRE_EVERY = 0.25     -- Fire Controller stops 10 ticks after the last command
@@ -106,6 +107,8 @@ local mounts = {}           -- cannon mount names (cc-cbc / compact mount)
 local mountInfo = {}        -- [name] = getInfo() table or false
 local direct = {}           -- [mount name] = true when it aims without controllers
 local controlled = {}       -- [mount name] = true once setComputerControl was sent
+local DIRECT_FILE = "/wasd_cannons_direct.dat"
+local pickedDirect = nil    -- mount name chosen with M (saved), nil = auto
 
 -- names sort as text, so "_10" would come before "_2" without this
 local function byNumber(a, b)
@@ -150,7 +153,9 @@ local function findAll()
 
   -- direct mounts: listed ones, or the mounts left over after the controller cannons
   direct = {}
-  if type(DIRECT_MOUNTS) == "table" then
+  if pickedDirect and peripheral.isPresent(pickedDirect) then
+    direct[pickedDirect] = true
+  elseif type(DIRECT_MOUNTS) == "table" then
     for _, n in ipairs(DIRECT_MOUNTS) do direct[n] = true end
   else
     for i = #cannons + 1, #mounts do direct[mounts[i]] = true end
@@ -395,6 +400,7 @@ local function axisRate(part)
 end
 
 -- adds setAngle calls to jobs; lead > 0 keeps the target ahead of the mount
+local directJobs
 local function aimJobs(jobs, yawLead, pitchLead, force)
   local values = {
     yaw = aim.yawZero + clamp(aim.yaw + (yawLead or 0), yawLimits()),
@@ -408,10 +414,24 @@ local function aimJobs(jobs, yawLead, pitchLead, force)
       end
     end
   end
-  -- direct mounts get no lead: they follow the target each tick
+  return directJobs(jobs, force)
+end
+
+-- direct mounts get no lead: they follow the target each tick
+directJobs = function(jobs, force)
   local dy = aim.yawZero + clamp(aim.yaw, yawLimits())
   local dp = (aim.pitchZero + clamp(aim.pitch, PITCH_MIN, PITCH_MAX)) * (DIRECT_INVERT_PITCH and -1 or 1)
+  for n in pairs(controlled) do
+    if not direct[n] then
+      jobs[#jobs + 1] = { n, "setComputerControl", false }
+      controlled[n] = nil
+    end
+  end
   for _, n in ipairs(directTargets()) do
+    -- the mount drops computer control when the computer reboots, a modem
+    -- is broken, or it re-assembles: hand it back
+    local info = mountInfo[n]
+    if info and info.computerControl == false then controlled[n] = nil end
     if not controlled[n] then
       jobs[#jobs + 1] = { n, "setComputerControl", true }
       controlled[n] = true
@@ -620,8 +640,12 @@ local function draw()
     local x = 10
     if c.direct then
       local info = mountInfo[c.mount]
-      put(x, y, "mount direct", info and colors.lime or colors.red, bg)
-      x = x + 15
+      local label = "mount " .. (c.mount:match("(%d+)$") or "?")
+      local col = colors.lime
+      if not info then col = colors.red
+      elseif info.computerControl == false then col = colors.orange end
+      put(x, y, label, col, bg)
+      x = x + #label + 1
     else
       for _, part in ipairs({ "yaw", "pitch", "fire" }) do
         local ok = c[part] ~= nil
@@ -637,18 +661,21 @@ local function draw()
         toggleOn and colors.lime or colors.lightGray, bg)
       x = x + 9
     end
-    if c.fire and blocked[c.fire] then
-      put(x + 1, y, "SHIP", colors.white, colors.red)
-    elseif c.fire and edgeCount(c.fire) == 0 then
-      put(x + 1, y, "no guard", colors.lightGray, bg)
-    end
     local info = ""
     local mi = c.direct and mountInfo[c.mount]
-    if mi and mi.yawShaftSpeed == 0 then info = "no rotation"
-    elseif mi and type(mi.yawShaftSpeed) == "number" then info = string.format("%.0f rpm", math.abs(mi.yawShaftSpeed))
+    if mi and mi.yawShaftSpeed == 0 then info = "no yaw spin"
+    elseif mi and mi.pitchShaftSpeed == 0 then info = "no pitch spin"
+    elseif mi and type(mi.yawShaftSpeed) == "number" then
+      info = string.format("Y%.0f P%.0f", math.abs(mi.yawShaftSpeed), math.abs(mi.pitchShaftSpeed or 0))
     elseif c.yaw and rpm[c.yaw] == 0 then info = "no rotation"
     elseif c.yaw and rpm[c.yaw] then info = string.format("%.0f rpm", rpm[c.yaw]) end
-    put(W - #info - 1, y, info, info == "no rotation" and colors.orange or colors.lightGray, bg)
+    local infoX = W - #info - 1
+    put(infoX, y, info, info:find("^no ") and colors.orange or colors.lightGray, bg)
+    if c.fire and blocked[c.fire] then
+      put(x + 1, y, "SHIP", colors.white, colors.red)
+    elseif c.fire and edgeCount(c.fire) == 0 and x + 9 < infoX then
+      put(x + 1, y, "no guard", colors.lightGray, bg)
+    end
     y = y + 1
   end
   if extras > 0 then put(3, y, "+" .. extras .. " unpaired controller(s), moved with ALL", colors.gray); y = y + 1 end
@@ -685,7 +712,7 @@ local function draw()
       or "Sweep over what to forget, E to finish", colors.magenta)
   elseif status ~= "" and now() - statusAt < 4 then put(2, H - 1, status, colors.yellow) end
   fill(H, colors.gray)
-  put(2, H, "H center Z set center X safety R trace E erase", colors.white, colors.gray)
+  put(2, H, "H center Z set ctr X safe R trace E erase M mount", colors.white, colors.gray)
 
   screen.setVisible(true)
 end
@@ -703,7 +730,8 @@ local function controlLoop()
     local dt = math.min(t - last, 0.25)
     last = t
     if t - lastScan > 5 then findAll(); lastScan = t end
-    if t - lastRate > 1 then readRates(); lastRate = t end
+    local beat = false
+    if t - lastRate > 1 then readRates(); lastRate = t; beat = true end
 
     local wantsAction = axis(KEYS.right, KEYS.left) ~= 0 or axis(KEYS.up, KEYS.down) ~= 0
       or (armed and down(KEYS.fire))
@@ -772,6 +800,8 @@ local function controlLoop()
     if refresh then lastFire = t end
     firing = next(fireOn) ~= nil
 
+    if beat and not moving then directJobs(jobs, true) end
+
     -- typewriter read, aim and trigger all go out in the same tick
     runJobs(jobs, poll)
     -- the typewriter read may not wait a tick; never spin without yielding
@@ -812,6 +842,27 @@ local function eventLoop()
           teach = mode
           stopFire()
         end
+      elseif a == keys.m and #mounts > 0 then
+        -- auto -> each mount in turn -> auto
+        local idx = 0
+        for i, n in ipairs(mounts) do if n == pickedDirect then idx = i end end
+        pickedDirect = mounts[idx + 1]
+        if pickedDirect then
+          local f = fs.open(DIRECT_FILE, "w")
+          if f then f.write(pickedDirect); f.close() end
+        else
+          fs.delete(DIRECT_FILE)
+        end
+        stopFire()
+        findAll()
+        readRates()
+        local jobs = {}
+        directJobs(jobs, true)
+        runJobs(jobs)
+        local list = {}
+        for _, n in ipairs(mounts) do if direct[n] then list[#list + 1] = n end end
+        say("No-controller mount: " .. (#list > 0 and table.concat(list, ", ") or "none")
+          .. (pickedDirect and "" or " (auto)"))
       elseif a == keys.x then
         armed = not armed
         if not armed then stopFire() end
@@ -831,6 +882,12 @@ end
 
 function readyToUpdate() return not firing and next(held) == nil end
 
+if fs.exists(DIRECT_FILE) then
+  local f = fs.open(DIRECT_FILE, "r")
+  pickedDirect = f.readAll()
+  f.close()
+  if pickedDirect == "" then pickedDirect = nil end
+end
 findAll()
 loadZones()
 if not loadAim() and cannons[1] then

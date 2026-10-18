@@ -27,7 +27,7 @@ Turn speed is capped by MAX_YAW_SPEED / MAX_PITCH_SPEED (deg/s), or the controll
 
 ## Cannons without controllers
 
-A cannon mount with a wired modem can be aimed and fired by the computer directly, no yaw/pitch/fire controllers. Mounts left over after the controller cannons are used this way (or list them in DIRECT_MOUNTS). The mount turns with the rotation going into its own yaw and pitch shafts, so give those power.
+A cannon mount with a wired modem can be aimed and fired by the computer directly, no yaw/pitch/fire controllers. Mounts left over after the controller cannons are used this way (or list them in DIRECT_MOUNTS). If it picks the wrong mount, press M on the computer to step through them. Its row shows the yaw/pitch shaft RPM, or "no yaw spin" / "no pitch spin" when a shaft has no rotation. The mount turns with the rotation going into its own yaw and pitch shafts, so give those power.
 
 ## Ship protection
 
