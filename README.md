@@ -30,6 +30,10 @@ Turn speed is capped by MAX_YAW_SPEED / MAX_PITCH_SPEED (deg/s), or the controll
 
 A cannon mount with a wired modem can be aimed and fired by the computer directly, no yaw/pitch/fire controllers. Mounts left over after the controller cannons are used this way (or list them in DIRECT_MOUNTS). If it picks the wrong mount, press M on the computer to step through them. Its row shows the yaw/pitch shaft RPM, or "no yaw spin" / "no pitch spin" when a shaft has no rotation. The mount turns with the rotation going into its own yaw and pitch shafts, so give those power.
 
+## Magnet to Bridge
+
+Also runs [Magnet to Bridge](https://github.com/levisnakes/cc-magnet-to-bridge) in the background: items in a VS Fluid Link item magnet hose connector are moved into a Create Connected inventory bridge. Put both on the network (or touching the computer); MAGNET_SIDE / BRIDGE_SIDE pin them if needed.
+
 ## Ship protection
 
 Press R, sweep the barrel along the top edge of your ship (A/D round, W/S so it just clears), press R again. That cannon won't fire below the traced edge (plus SAFE_MARGIN degrees). The angles are the mount's own, so it stays right as the ship turns. TAB on one cannon teaches just that one; on ALL it teaches every cannon. E works the same way but erases.

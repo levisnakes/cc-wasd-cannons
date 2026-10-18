@@ -18,6 +18,10 @@
 -- Moving or firing while the cannons are disassembled assembles them, and
 -- where they point on assembly becomes the center.
 --
+-- Also runs Magnet to Bridge in the background: everything in a VS Fluid
+-- Link item magnet hose connector is moved into a Create Connected inventory
+-- bridge. Both just need to be on the network (or touching the computer).
+--
 -- Ship protection: press R on the computer, then sweep the barrel along the
 -- top edge of your ship (A/D round, W/S so it just clears), then R again.
 -- The cannon won't fire below that edge. E (on/off) erases instead.
@@ -46,6 +50,9 @@ DIRECT_INVERT_PITCH = false  -- true if W points a direct-mount cannon down
 TOGGLE_CANNONS = { 3 }    -- these only fire with SPACE after Q turns them on
 TOGGLE_KEY = "q"
 SAFE_MARGIN = 3           -- degrees of extra room above the traced ship edge
+MAGNET_SIDE = nil         -- magnet connector side/name, nil = find it
+BRIDGE_SIDE = nil         -- inventory bridge side/name, nil = find it
+MAGNET_WAIT_TIME = 0.5    -- seconds to wait when nothing moved
 ARMED_AT_START = true     -- false = start with the safety on
 AUTO_UPDATE = true
 
@@ -57,7 +64,7 @@ end
 
 -- ============================================================ setup
 
-VERSION = "1.8.2"
+VERSION = "1.9.0"
 local SAVE_FILE = "/wasd_cannons.dat"
 local TICK = 0.05
 local FIRE_EVERY = 0.25     -- Fire Controller stops 10 ticks after the last command
@@ -188,6 +195,7 @@ local held = {}
 local kbHeld = {}
 local twError = nil
 local status, statusAt = "", 0
+local magnetState = { found = false, moved = 0, problem = nil }
 local dirty = false
 local ZONE_FILE = "/wasd_cannons_zones.dat"
 local ZONE_BIN = 2          -- degrees of yaw per remembered edge point
@@ -742,6 +750,13 @@ local function draw()
   end
   y = y + 1
 
+  -- magnet to bridge
+  if magnetState.found then
+    local m = magnetState
+    if m.problem then put(3, H - 5, ("Magnet: " .. m.problem):sub(1, W - 3), colors.red)
+    else put(3, H - 5, "Magnet \26 bridge: " .. m.moved .. " items moved", colors.gray) end
+  end
+
   -- live keys
   local ky = H - 4
   local function k(name) return down(KEYS[name]) end
@@ -941,6 +956,77 @@ local function eventLoop()
   end
 end
 
+-- ============================================================ magnet to bridge
+
+local magnetLoop
+do
+  local MAGNET_TYPE = "vsfluidlink:item_magnet_hose_connector"
+  local BRIDGE_TYPE = "create_connected:inventory_bridge"
+  local magnet, bridge = nil, nil
+
+  -- the configured name if it's there and the right block, otherwise the
+  -- first attached peripheral of that type
+  local function locate(wanted, pType)
+    if wanted and peripheral.isPresent(wanted) and peripheral.hasType(wanted, pType) then
+      return wanted
+    end
+    for _, n in ipairs(peripheral.getNames()) do
+      if peripheral.hasType(n, pType) then return n end
+    end
+    return nil
+  end
+
+  -- one pass: list the magnet, push every slot at once
+  local function moveOnce()
+    local ok, items = pcall(peripheral.call, magnet, "list")
+    if not ok or not items then return 0, "can't read the magnet connector" end
+    local moved, full, failed = 0, false, nil
+    local tasks = {}
+    for slot, item in pairs(items) do
+      tasks[#tasks + 1] = function()
+        local ok2, n = pcall(peripheral.call, magnet, "pushItems", bridge, slot)
+        if ok2 and n then
+          moved = moved + n
+          if n < item.count then full = true end
+        elseif not ok2 then
+          failed = tostring(n)
+        end
+      end
+    end
+    if #tasks > 0 then parallel.waitForAll(table.unpack(tasks)) end
+    magnetState.moved = magnetState.moved + moved
+    if failed then return moved, failed end
+    magnetState.problem = full and "the bridge's storage is full" or nil
+    return moved, nil
+  end
+
+  magnetLoop = function()
+    while true do
+      magnet = locate(MAGNET_SIDE, MAGNET_TYPE)
+      bridge = locate(BRIDGE_SIDE, BRIDGE_TYPE)
+      magnetState.found = magnet ~= nil or bridge ~= nil
+      if not magnet then
+        magnetState.problem = "can't find the item magnet hose connector"
+        sleep(5)
+      elseif not bridge then
+        magnetState.problem = "can't find the inventory bridge"
+        sleep(5)
+      else
+        magnetState.problem = nil
+        while true do
+          local moved, err = moveOnce()
+          if err then
+            magnetState.problem = err
+            sleep(1)
+            break
+          end
+          if moved == 0 then sleep(math.max(MAGNET_WAIT_TIME or 0.5, 0.05)) end
+        end
+      end
+    end
+  end
+end
+
 function readyToUpdate() return not firing and next(held) == nil end
 
 if fs.exists(DIRECT_FILE) then
@@ -1123,5 +1209,5 @@ end
 
 
 bootUpdate()
-parallel.waitForAny(controlLoop, eventLoop, updateLoop)
+parallel.waitForAny(controlLoop, eventLoop, magnetLoop, updateLoop)
 stopFire()
