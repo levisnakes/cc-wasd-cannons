@@ -2,7 +2,7 @@
 
 Aim and fire Create Big Cannons by hand from a Create Avionics Linked Typewriter (CC:Tweaked).
 
-One computer, wired to the typewriter and, for each cannon, a Create Radar Auto Yaw Controller, Auto Pitch Controller and Fire Controller.
+One computer, wired to the typewriter and a wired modem on each cannon mount. The computer aims and fires each cannon through its mount (cc-cbc); give each mount rotation in its yaw and pitch shafts. Set USE_CONTROLLERS = true to use Create Radar yaw/pitch/fire controllers instead.
 
 ```
 wget https://raw.githubusercontent.com/levisnakes/cc-wasd-cannons/main/wasd_cannons.lua startup.lua

@@ -1,10 +1,10 @@
 -- WASD Cannons: aim and fire Create Big Cannons by hand from a Linked Typewriter.
 --
 -- One computer. On its wired network (or touching it): the Linked Typewriter
--- plus, for each cannon, an Auto Yaw Controller, an Auto Pitch Controller and
--- a Fire Controller. Controllers are paired by name order (lowest yaw goes
--- with lowest pitch and lowest fire). If that pairs them wrong, press TAB
--- to pick one cannon and see which one moves, or set CANNONS below.
+-- and a wired modem on each Cannon Mount. The computer aims and fires every
+-- cannon through its mount; the mount turns with the rotation fed into its
+-- own yaw and pitch shafts, so give those power. No yaw/pitch/fire
+-- controllers needed (set USE_CONTROLLERS = true to use Create Radar ones).
 --
 -- The typewriter only sends keys that are bound to a frequency, so bind
 -- W A S D, SPACE, LEFT SHIFT, TAB and Q on it. The computer's own keyboard works too.
@@ -14,15 +14,8 @@
 --   Q     cannons in TOGGLE_CANNONS join SPACE or sit out
 --   On the computer keyboard: H back to center, Z set here as center, X safety
 --
--- Put a wired modem on each Cannon Mount too: then moving or firing while the
--- cannons are disassembled assembles them, and where they point on assembly
--- becomes the center.
---
--- A cannon can also skip the controllers: its mount (with a modem) aims and
--- fires it directly. It turns with the rotation fed into the mount's own
--- yaw and pitch shafts, so those need power. Mounts left over after the
--- controller cannons are used this way (or list them in DIRECT_MOUNTS).
--- If the wrong mount gets picked, press M on the computer to try the next one.
+-- Moving or firing while the cannons are disassembled assembles them, and
+-- where they point on assembly becomes the center.
 --
 -- Ship protection: press R on the computer, then sweep the barrel along the
 -- top edge of your ship (A/D round, W/S so it just clears), then R again.
@@ -46,6 +39,7 @@ PITCH_MAX = 60
 MAX_YAW_SPEED = 20        -- degrees per second
 MAX_PITCH_SPEED = 15
 CANNONS = nil             -- nil = auto. Or {{yaw="...", pitch="...", fire="..."}, {...}}
+USE_CONTROLLERS = false   -- false = every cannon is aimed and fired by its mount
 DIRECT_MOUNTS = nil       -- nil = auto. Or {"cannon_mount_2"}: mounts with no controllers
 DIRECT_INVERT_PITCH = false  -- true if W points a direct-mount cannon down
 TOGGLE_CANNONS = { 3 }    -- these only fire with SPACE after Q turns them on
@@ -62,7 +56,7 @@ end
 
 -- ============================================================ setup
 
-VERSION = "1.7.1"
+VERSION = "1.8.0"
 local SAVE_FILE = "/wasd_cannons.dat"
 local TICK = 0.05
 local FIRE_EVERY = 0.25     -- Fire Controller stops 10 ticks after the last command
@@ -129,9 +123,16 @@ local function findAll()
     elseif hasType(n, "cannon_mount") or hasType(n, "compact_cannon_mount") then mounts[#mounts + 1] = n
     elseif not typewriter and hasType(n, "linked_typewriter") then typewriter = n end
   end
+  -- mount-only: leftover controllers are ignored (break them, or they
+  -- keep pulling their mount back to their last target)
+  local ignored = 0
+  if USE_CONTROLLERS == false then
+    ignored = #yaws + #pitches + #fires
+    yaws, pitches, fires = {}, {}, {}
+  end
   extras = 0
   all = { yaw = yaws, pitch = pitches, fire = fires }
-  if type(CANNONS) == "table" then
+  if type(CANNONS) == "table" and USE_CONTROLLERS ~= false then
     cannons = CANNONS
     table.sort(mounts, byNumber)
     all = { yaw = {}, pitch = {}, fire = {} }
@@ -150,10 +151,13 @@ local function findAll()
     if parts >= 2 then list[#list + 1] = c else extras = extras + 1 end
   end
   cannons = list
+  extras = extras + ignored
 
   -- direct mounts: listed ones, or the mounts left over after the controller cannons
   direct = {}
-  if pickedDirect and peripheral.isPresent(pickedDirect) then
+  if USE_CONTROLLERS == false then
+    for _, n in ipairs(mounts) do direct[n] = true end
+  elseif pickedDirect and peripheral.isPresent(pickedDirect) then
     direct[pickedDirect] = true
   elseif type(DIRECT_MOUNTS) == "table" then
     for _, n in ipairs(DIRECT_MOUNTS) do direct[n] = true end
@@ -678,7 +682,11 @@ local function draw()
     end
     y = y + 1
   end
-  if extras > 0 then put(3, y, "+" .. extras .. " unpaired controller(s), moved with ALL", colors.gray); y = y + 1 end
+  if extras > 0 and USE_CONTROLLERS == false then
+    put(3, y, extras .. " controller(s) ignored - break them", colors.orange); y = y + 1
+  elseif extras > 0 then
+    put(3, y, "+" .. extras .. " unpaired controller(s), moved with ALL", colors.gray); y = y + 1
+  end
   if #mounts == 0 then
     put(3, y, "No mount on network: no auto-assemble", colors.gray)
   else
@@ -712,7 +720,8 @@ local function draw()
       or "Sweep over what to forget, E to finish", colors.magenta)
   elseif status ~= "" and now() - statusAt < 4 then put(2, H - 1, status, colors.yellow) end
   fill(H, colors.gray)
-  put(2, H, "H center Z set ctr X safe R trace E erase M mount", colors.white, colors.gray)
+  put(2, H, USE_CONTROLLERS == false and "H center  Z set center  X safety  R trace  E erase"
+    or "H center Z set ctr X safe R trace E erase M mount", colors.white, colors.gray)
 
   screen.setVisible(true)
 end
@@ -842,7 +851,7 @@ local function eventLoop()
           teach = mode
           stopFire()
         end
-      elseif a == keys.m and #mounts > 0 then
+      elseif a == keys.m and #mounts > 0 and USE_CONTROLLERS ~= false then
         -- auto -> each mount in turn -> auto
         local idx = 0
         for i, n in ipairs(mounts) do if n == pickedDirect then idx = i end end
