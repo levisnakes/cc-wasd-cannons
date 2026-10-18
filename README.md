@@ -17,6 +17,7 @@ wget https://raw.githubusercontent.com/levisnakes/cc-wasd-cannons/main/wasd_cann
 | TAB | aim all / cannon 1 / cannon 2 / ... |
 | Q | cannons in TOGGLE_CANNONS (default #3) join SPACE or sit out |
 | H, Z, X (computer keyboard) | back to center, set center, safety |
+| [ / ] / C (computer keyboard) | set yaw limit at current aim / set the other limit / clear limits |
 | R / E (computer keyboard) | start/stop tracing the ship edge / erasing it |
 
 Put a wired modem on each Cannon Mount as well: moving or firing while the cannons are disassembled assembles them, and the direction they face on assembly becomes the center.

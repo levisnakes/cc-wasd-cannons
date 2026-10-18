@@ -13,6 +13,7 @@
 --   TAB   all / cannon 1 / cannon 2 / ...
 --   Q     cannons in TOGGLE_CANNONS join SPACE or sit out
 --   On the computer keyboard: H back to center, Z set here as center, X safety
+--   [ and ] set the two yaw limits where the cannon points now, C clears them
 --
 -- Moving or firing while the cannons are disassembled assembles them, and
 -- where they point on assembly becomes the center.
@@ -32,8 +33,8 @@ INVERT_YAW = false        -- true if A turns right
 INVERT_PITCH = false      -- true if W points down
 YAW_MIN = nil             -- limits in degrees from center (nil = no limit)
 YAW_MAX = nil
-YAW_RIGHT_LIMIT = 204     -- mount yaw (shown as "Mount yaw" on screen) it can't
-YAW_LEFT_LIMIT = 330      -- turn past; nil = no limit
+YAW_LIMIT_1 = nil         -- mount yaw ("Mount yaw" on screen) it can't turn past;
+YAW_LIMIT_2 = nil         -- easier: aim at each end and press [ and ] on the computer
 PITCH_MIN = -30
 PITCH_MAX = 60
 MAX_YAW_SPEED = 20        -- degrees per second
@@ -56,7 +57,7 @@ end
 
 -- ============================================================ setup
 
-VERSION = "1.8.1"
+VERSION = "1.8.2"
 local SAVE_FILE = "/wasd_cannons.dat"
 local TICK = 0.05
 local FIRE_EVERY = 0.25     -- Fire Controller stops 10 ticks after the last command
@@ -176,7 +177,9 @@ end
 
 -- assemYaw = mount yaw at the last assembly (assemKnown = 1 once seen)
 -- frame 2 = angles read the way the mount aims (older saves were mirrored)
-local aim = { yaw = 0, pitch = 0, yawZero = 0, pitchZero = 0, assemYaw = 0, assemKnown = 0, frame = 2 }
+-- limA/limB = yaw limits set with [ and ] (-1 = not set)
+local aim = { yaw = 0, pitch = 0, yawZero = 0, pitchZero = 0, assemYaw = 0, assemKnown = 0, frame = 2,
+              limA = -1, limB = -1 }
 local selected = 0          -- 0 = all cannons
 local toggleOn = false      -- TOGGLE_CANNONS fire with SPACE
 local armed = ARMED_AT_START ~= false
@@ -282,9 +285,11 @@ end
 -- center sits in is where the cannon may turn.
 local function yawLimits()
   local lo, hi = YAW_MIN, YAW_MAX
-  if YAW_RIGHT_LIMIT and YAW_LEFT_LIMIT then
+  local la, lb = YAW_LIMIT_1, YAW_LIMIT_2
+  if aim.limA >= 0 and aim.limB >= 0 then la, lb = aim.limA, aim.limB end
+  if la and lb then
     local zero = aim.yawZero % 360
-    local a, b = YAW_RIGHT_LIMIT % 360, YAW_LEFT_LIMIT % 360
+    local a, b = la % 360, lb % 360
     local w = (b - a) % 360
     local c = (zero - a) % 360
     if c > w then a, b = b, a; w = 360 - w; c = (zero - a) % 360 end
@@ -648,6 +653,20 @@ local function draw()
   local function speedText(a)
     return string.format("%.0f%s/s", (axisRate(a)), DEG)
   end
+  do
+    local la, lb = YAW_LIMIT_1, YAW_LIMIT_2
+    if aim.limA >= 0 and aim.limB >= 0 then la, lb = aim.limA, aim.limB end
+    local text
+    if la and lb then
+      text = string.format("Yaw limits %.0f%s and %.0f%s   C clears", la % 360, DEG, lb % 360, DEG)
+    elseif aim.limA >= 0 or aim.limB >= 0 then
+      text = "Yaw limit " .. (aim.limA >= 0 and "[" or "]") .. " set, aim at the other end and press "
+        .. (aim.limA >= 0 and "]" or "[")
+    else
+      text = "No yaw limits   aim at each end, press [ and ]"
+    end
+    put(2, 6, text:sub(1, W - 2), colors.gray)
+  end
   put(2, 5, string.format("Mount yaw %.0f%s", (aim.yawZero + aim.yaw) % 360, DEG)
     .. "   speed " .. speedText("yaw") .. " / " .. speedText("pitch"), colors.gray)
 
@@ -896,6 +915,15 @@ local function eventLoop()
         for _, n in ipairs(mounts) do if direct[n] then list[#list + 1] = n end end
         say("No-controller mount: " .. (#list > 0 and table.concat(list, ", ") or "none")
           .. (pickedDirect and "" or " (auto)"))
+      elseif a == keys.leftBracket or a == keys.rightBracket then
+        local here = (aim.yawZero + aim.yaw) % 360
+        if a == keys.leftBracket then aim.limA = here else aim.limB = here end
+        saveAim()
+        say(string.format("Yaw limit %s set at %.0f%s", a == keys.leftBracket and "[" or "]", here, DEG))
+      elseif a == keys.c then
+        aim.limA, aim.limB = -1, -1
+        saveAim()
+        say("Yaw limits cleared")
       elseif a == keys.x then
         armed = not armed
         if not armed then stopFire() end
