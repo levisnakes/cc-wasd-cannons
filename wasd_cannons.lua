@@ -56,7 +56,7 @@ end
 
 -- ============================================================ setup
 
-VERSION = "1.8.0"
+VERSION = "1.8.1"
 local SAVE_FILE = "/wasd_cannons.dat"
 local TICK = 0.05
 local FIRE_EVERY = 0.25     -- Fire Controller stops 10 ticks after the last command
@@ -175,7 +175,8 @@ end
 -- ============================================================ state
 
 -- assemYaw = mount yaw at the last assembly (assemKnown = 1 once seen)
-local aim = { yaw = 0, pitch = 0, yawZero = 0, pitchZero = 0, assemYaw = 0, assemKnown = 0 }
+-- frame 2 = angles read the way the mount aims (older saves were mirrored)
+local aim = { yaw = 0, pitch = 0, yawZero = 0, pitchZero = 0, assemYaw = 0, assemKnown = 0, frame = 2 }
 local selected = 0          -- 0 = all cannons
 local toggleOn = false      -- TOGGLE_CANNONS fire with SPACE
 local armed = ARMED_AT_START ~= false
@@ -220,7 +221,7 @@ local function loadAim()
   local f = fs.open(SAVE_FILE, "r")
   local t = textutils.unserialize(f.readAll())
   f.close()
-  if type(t) ~= "table" then return false end
+  if type(t) ~= "table" or t.frame ~= 2 then return false end
   for k in pairs(aim) do if type(t[k]) == "number" then aim[k] = t[k] end end
   return true
 end
@@ -474,6 +475,31 @@ end
 -- Assemble every disassembled mount. The controllers would swing a freshly
 -- assembled cannon to their old target, so aim them at where the mount
 -- faced last time first, then make the real heading the new center.
+local function mountAngles(n)
+  if direct[n] then runJobs({ { n, "setComputerControl", false } }) end
+  runJobs({ { n, "setComputerControl", true } })
+  local ok, info = pcall(peripheral.call, n, "getInfo")
+  if direct[n] then
+    controlled[n] = true
+  else
+    runJobs({ { n, "setComputerControl", false } })
+  end
+  if not ok or type(info) ~= "table" then return nil end
+  mountInfo[n] = info
+  if type(info.targetYaw) ~= "number" then return nil end
+  return info.targetYaw % 360, tonumber(info.targetPitch) or 0
+end
+
+-- first assembled mount, preferring one the computer drives
+local function referenceMount()
+  for _, pass in ipairs({ true, false }) do
+    for _, n in ipairs(mounts) do
+      local info = mountInfo[n]
+      if info and info.assembled and (direct[n] or false) == pass then return n end
+    end
+  end
+end
+
 local function assembleMounts()
   local need = disassembled()
   if #need == 0 then return false end
@@ -489,10 +515,8 @@ local function assembleMounts()
   runJobs(jobs)
   readRates()
   local yaw = nil
-  for _, n in ipairs(mounts) do
-    local info = mountInfo[n]
-    if info and info.assembled and type(info.yaw) == "number" then yaw = info.yaw; break end
-  end
+  local ref = referenceMount()
+  if ref then yaw = mountAngles(ref) end
   if #disassembled() > 0 then
     say("Assembly failed - check the cannon build")
   else
@@ -899,12 +923,21 @@ if fs.exists(DIRECT_FILE) then
 end
 findAll()
 loadZones()
-if not loadAim() and cannons[1] then
-  -- first run: start from wherever cannon 1 is pointed
-  aim.yawZero = call(cannons[1].yaw, "getAngle") or 0
-  aim.pitchZero = call(cannons[1].pitch, "getAngle") or 0
-end
 readRates()
+if not loadAim() then
+  -- first run (or an old save): start from wherever the cannons point now
+  local ref = referenceMount()
+  local y, p = nil, nil
+  if ref then y, p = mountAngles(ref) end
+  if y then
+    aim.yawZero, aim.pitchZero, aim.yaw, aim.pitch = y, 0, 0, p
+    aim.assemYaw, aim.assemKnown = y, 1
+  elseif cannons[1] and cannons[1].yaw then
+    aim.yawZero = call(cannons[1].yaw, "getAngle") or 0
+    aim.pitchZero = call(cannons[1].pitch, "getAngle") or 0
+  end
+  saveAim()
+end
 pushAim(0, 0, true)
 
 -- ============================================================ auto-update
