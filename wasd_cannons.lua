@@ -64,7 +64,7 @@ end
 
 -- ============================================================ setup
 
-VERSION = "1.9.0"
+VERSION = "1.9.1"
 local SAVE_FILE = "/wasd_cannons.dat"
 local TICK = 0.05
 local FIRE_EVERY = 0.25     -- Fire Controller stops 10 ticks after the last command
@@ -184,9 +184,11 @@ end
 
 -- assemYaw = mount yaw at the last assembly (assemKnown = 1 once seen)
 -- frame 2 = angles read the way the mount aims (older saves were mirrored)
--- limA/limB = yaw limits set with [ and ] (-1 = not set)
+-- limA/limB = yaw limits set with [ and ] (-1 = not set); rawA/rawB = the
+-- same, unwrapped, so the turn between the two presses is known; limS/limW =
+-- the allowed arc (start, width) = the side swept through (limW -1 = unknown)
 local aim = { yaw = 0, pitch = 0, yawZero = 0, pitchZero = 0, assemYaw = 0, assemKnown = 0, frame = 2,
-              limA = -1, limB = -1 }
+              limA = -1, limB = -1, rawA = 0, rawB = 0, limS = 0, limW = -1 }
 local selected = 0          -- 0 = all cannons
 local toggleOn = false      -- TOGGLE_CANNONS fire with SPACE
 local armed = ARMED_AT_START ~= false
@@ -288,25 +290,53 @@ end
 
 -- Yaw/pitch here are the mount's own angles, which turn with the ship,
 -- so the traced edge stays right wherever the ship goes.
--- Yaw limits relative to the center: YAW_MIN/YAW_MAX combined with the mount
--- yaw limits. Those two angles split the circle into two arcs; the one the
--- center sits in is where the cannon may turn.
-local function yawLimits()
-  local lo, hi = YAW_MIN, YAW_MAX
-  local la, lb = YAW_LIMIT_1, YAW_LIMIT_2
-  if aim.limA >= 0 and aim.limB >= 0 then la, lb = aim.limA, aim.limB end
-  if la and lb then
-    local zero = aim.yawZero % 360
-    local a, b = la % 360, lb % 360
-    local w = (b - a) % 360
-    local c = (zero - a) % 360
-    if c > w then a, b = b, a; w = 360 - w; c = (zero - a) % 360 end
-    if c <= w then
-      lo = math.max(lo or -math.huge, -c)
-      hi = math.min(hi or math.huge, w - c)
-    end
+-- The allowed yaw arc in mount yaw: start and width going the + way.
+-- [ and ] remember the side the cannon turned through between them.
+local function yawArc()
+  if aim.limA >= 0 and aim.limB >= 0 then
+    if aim.limW >= 0 then return aim.limS, aim.limW end
+    -- set before the turn was recorded: the side away from the center
+    local w = (aim.limB - aim.limA) % 360
+    local c = (aim.yawZero - aim.limA) % 360
+    if c <= w then return aim.limB, 360 - w end
+    return aim.limA, w
   end
-  return lo, hi
+  if YAW_LIMIT_1 and YAW_LIMIT_2 then
+    -- settings: the side the center is on
+    local w = (YAW_LIMIT_2 - YAW_LIMIT_1) % 360
+    local c = (aim.yawZero - YAW_LIMIT_1) % 360
+    if c <= w then return YAW_LIMIT_1 % 360, w end
+    return YAW_LIMIT_2 % 360, 360 - w
+  end
+  return nil
+end
+
+-- yaw relative to the center, moved inside the allowed arc (nearest end if outside)
+local function clampYaw(r)
+  local st, w = yawArc()
+  if not st then return clamp(r, YAW_MIN, YAW_MAX) end
+  local lo = (st - aim.yawZero + 180) % 360 - 180
+  local d = (r - lo) % 360
+  if d <= w then return lo + d end
+  if d - w < 360 - d then return lo + w end
+  return lo
+end
+
+-- gauge range relative to the center
+local function yawLimits()
+  local st, w = yawArc()
+  if not st then return YAW_MIN, YAW_MAX end
+  local lo = (st - aim.yawZero + 180) % 360 - 180
+  return lo, lo + w
+end
+
+-- after [ or ]: the arc is the way the cannon turned from one press to the other
+local function setArc()
+  if aim.limA < 0 or aim.limB < 0 then return end
+  local d = aim.rawB - aim.rawA
+  if d >= 360 or d <= -360 then d = d % 360 end
+  if d >= 0 then aim.limS, aim.limW = aim.limA, d
+  else aim.limS, aim.limW = aim.limB, -d end
 end
 
 local function absAim()
@@ -421,7 +451,7 @@ end
 local directJobs
 local function aimJobs(jobs, yawLead, pitchLead, force)
   local values = {
-    yaw = aim.yawZero + clamp(aim.yaw + (yawLead or 0), yawLimits()),
+    yaw = aim.yawZero + clampYaw(aim.yaw + (yawLead or 0)),
     pitch = aim.pitchZero + clamp(aim.pitch + (pitchLead or 0), PITCH_MIN, PITCH_MAX),
   }
   for part, v in pairs(values) do
@@ -437,7 +467,7 @@ end
 
 -- direct mounts get no lead: they follow the target each tick
 directJobs = function(jobs, force)
-  local dy = aim.yawZero + clamp(aim.yaw, yawLimits())
+  local dy = aim.yawZero + clampYaw(aim.yaw)
   local dp = (aim.pitchZero + clamp(aim.pitch, PITCH_MIN, PITCH_MAX)) * (DIRECT_INVERT_PITCH and -1 or 1)
   for n in pairs(controlled) do
     if not direct[n] then
@@ -662,11 +692,11 @@ local function draw()
     return string.format("%.0f%s/s", (axisRate(a)), DEG)
   end
   do
-    local la, lb = YAW_LIMIT_1, YAW_LIMIT_2
-    if aim.limA >= 0 and aim.limB >= 0 then la, lb = aim.limA, aim.limB end
+    local st, w = yawArc()
     local text
-    if la and lb then
-      text = string.format("Yaw limits %.0f%s and %.0f%s   C clears", la % 360, DEG, lb % 360, DEG)
+    if st then
+      text = string.format("Yaw %.0f%s to %.0f%s (%.0f%s wide)  C clears", st % 360, DEG,
+        (st + w) % 360, DEG, w, DEG)
     elseif aim.limA >= 0 or aim.limB >= 0 then
       text = "Yaw limit " .. (aim.limA >= 0 and "[" or "]") .. " set, aim at the other end and press "
         .. (aim.limA >= 0 and "]" or "[")
@@ -819,9 +849,7 @@ local function controlLoop()
     local yr, yTop = axisRate("yaw")
     local pr, pTop = axisRate("pitch")
     local mult = slow and SLOW or 1
-    local ylo, yhi = yawLimits()
-    if ylo or yhi then aim.yaw = (aim.yaw + 180) % 360 - 180 end
-    aim.yaw = clamp(aim.yaw + yawDir * yr * mult * dt, ylo, yhi)
+    aim.yaw = clampYaw(aim.yaw + yawDir * yr * mult * dt)
     aim.pitch = clamp(aim.pitch + pitchDir * pr * mult * dt, PITCH_MIN, PITCH_MAX)
 
     local jobs = {}
@@ -931,12 +959,15 @@ local function eventLoop()
         say("No-controller mount: " .. (#list > 0 and table.concat(list, ", ") or "none")
           .. (pickedDirect and "" or " (auto)"))
       elseif a == keys.leftBracket or a == keys.rightBracket then
-        local here = (aim.yawZero + aim.yaw) % 360
-        if a == keys.leftBracket then aim.limA = here else aim.limB = here end
+        local raw = aim.yawZero + aim.yaw
+        if a == keys.leftBracket then aim.limA, aim.rawA = raw % 360, raw
+        else aim.limB, aim.rawB = raw % 360, raw end
+        local here = raw % 360
+        setArc()
         saveAim()
         say(string.format("Yaw limit %s set at %.0f%s", a == keys.leftBracket and "[" or "]", here, DEG))
       elseif a == keys.c then
-        aim.limA, aim.limB = -1, -1
+        aim.limA, aim.limB, aim.limW = -1, -1, -1
         saveAim()
         say("Yaw limits cleared")
       elseif a == keys.x then
